@@ -1,4 +1,4 @@
-# Maintainer: Nexus Prime
+# Maintainer: DavidNexuss
 pkgname=shaderpaper
 pkgver=1.0.0
 pkgrel=1
