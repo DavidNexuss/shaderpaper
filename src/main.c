@@ -306,6 +306,7 @@ struct ShaderUniforms {
   GLint iTime;
   GLint iX;
   GLint iY;
+  GLint iMouse;
   GLint iWidth;
   GLint iHeight;
   GLint iResolution;
@@ -333,6 +334,7 @@ void shaderUniformsInitLocations(struct ShaderUniforms* u, GLuint program) {
   GET_LOC(iTime, "iTime");
   GET_LOC(iX, "iX");
   GET_LOC(iY, "iY");
+  GET_LOC(iMouse, "iMouse");
   GET_LOC(iWidth, "iWidth");
   GET_LOC(iHeight, "iHeight");
   GET_LOC(iResolution, "iResolution"); // Get location for new iResolution uniform
@@ -357,6 +359,7 @@ void shaderUniformsUpload(struct ShaderUniforms* u) {
   if (u->iTime != -1) glUniform1f(u->iTime, u->time);
   if (u->iX != -1) glUniform1f(u->iX, u->x);
   if (u->iY != -1) glUniform1f(u->iY, u->y);
+  if (u->iMouse != -1) glUniform2f(u->iMouse, u->x, u->y);
   if (u->iWidth != -1) glUniform1f(u->iWidth, u->width);
   if (u->iHeight != -1) glUniform1f(u->iHeight, u->height);
   if (u->iResolution != -1) glUniform3f(u->iResolution, u->width, u->height, 1.0f); // Upload iResolution
