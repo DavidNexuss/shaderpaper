@@ -1,0 +1,17 @@
+pkgbase = shaderpaper
+	pkgdesc = GLSL-based animated wallpaper shader runner for Linux (uses X11 + OpenGL)
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/DavidNexuss/shaderpaper
+	arch = x86_64
+	license = MIT
+	makedepends = git
+	makedepends = gcc
+	makedepends = make
+	depends = libgl
+	depends = libx11
+	depends = glew
+	source = git+https://github.com/DavidNexuss/shaderpaper.git#tag=v1.0.0
+	md5sums = SKIP
+
+pkgname = shaderpaper
