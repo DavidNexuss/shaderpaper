@@ -12,3 +12,8 @@ bin/parser.o: src/parser.cpp
 
 clean:
 	rm -rf shaderpaper bin/*.o
+
+install: shaderpaper
+	install -Dm755 shaderpaper $(DESTDIR)/usr/bin/shaderpaper
+	install -d $(DESTDIR)/usr/share/shaderpaper/config
+	cp -a config/* $(DESTDIR)/usr/share/shaderpaper/config/

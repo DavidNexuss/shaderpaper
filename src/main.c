@@ -34,45 +34,59 @@ void strndump(char* dst, const char* source, int max) {
 
 //=========================[GL HELPERS]===================================================
 
-void* fileRead(const char* path) {
+char* resolve_path(const char* path) {
+  if (path[0] == '~') {
+    const char* home = getenv("HOME");
+    if (!home) return NULL;
+
+    size_t len      = strlen(home) + strlen(path);
+    char*  fullpath = malloc(len);
+    if (!fullpath) return NULL;
+
+    strcpy(fullpath, home);
+    strcat(fullpath, path + 1);
+    return fullpath;
+  } else {
+    return strdup(path);
+  }
+}
+
+void* fileRead(const char* abpath) {
+  char* path = resolve_path(abpath);
+
   FILE* file = fopen(path, "rb");
-  if (!file) return 0;
+  if (!file) {
+    fprintf(stderr, "File not found: %s\n", path);
+    return 0;
+  }
 
   fseek(file, 0, SEEK_END);
   long size = ftell(file);
+  if (size == 0) {
+    fprintf(stderr, "File empty: %s\n", path);
+    fclose(file);
+    free(path);
+    return 0;
+  }
   fseek(file, 0, SEEK_SET);
 
   char* source = malloc(size + 1);
   if (!source) {
     fclose(file);
+    free(path);
     return 0;
   }
 
   fread(source, 1, size, file);
   source[size] = '\0';
   fclose(file);
+  free(path);
   return source;
 }
 
 
-//Loads shader from file path and type
 GLuint glShaderCompile(const char* path, GLenum type) {
-  FILE* file = fopen(path, "rb");
-  if (!file) return 0;
-
-  fseek(file, 0, SEEK_END);
-  long size = ftell(file);
-  fseek(file, 0, SEEK_SET);
-
-  char* source = malloc(size + 1);
-  if (!source) {
-    fclose(file);
-    return 0;
-  }
-
-  fread(source, 1, size, file);
-  source[size] = '\0';
-  fclose(file);
+  void* source = fileRead(path);
 
   GLuint shader = glCreateShader(type);
   glShaderSource(shader, 1, (const char**)&source, NULL);
