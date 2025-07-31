@@ -222,6 +222,77 @@ struct glTexturePack glTexturePackLoad(int textureCount, char** texturePaths) {
   return pack;
 }
 
+struct glFrameBuffer {
+  GLuint fbo;
+  GLuint rt[8];
+  GLuint ds;
+  int    rtcount;
+  int    width;
+  int    height;
+};
+
+int glFrameBufferCreate(struct glFrameBuffer* framebuffer, int width, int height) {
+  GLuint fbo, colorTex, depthRb;
+
+  glGenFramebuffers(1, &fbo);
+  glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+
+  glGenTextures(1, &colorTex);
+  glBindTexture(GL_TEXTURE_2D, colorTex);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, colorTex, 0);
+
+  glGenRenderbuffers(1, &depthRb);
+  glBindRenderbuffer(GL_RENDERBUFFER, depthRb);
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+  glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRb);
+
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+    fprintf(stderr, "[ERR] Framebuffer incomplete\n");
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return 1;
+  }
+
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+  framebuffer->fbo     = fbo;
+  framebuffer->rt[0]   = colorTex;
+  framebuffer->ds      = depthRb;
+  framebuffer->rtcount = 1;
+  framebuffer->width   = width;
+  framebuffer->height  = height;
+
+  fprintf(stderr, "[OK] Framebuffer created: %dx%d\n", width, height);
+  return 0;
+}
+int glFrameBufferResize(struct glFrameBuffer* framebuffer, int width, int height) {
+  if (width == framebuffer->width && height == framebuffer->height) return 0;
+
+  for (int i = 0; i < framebuffer->rtcount; i++) {
+    glBindTexture(GL_TEXTURE_2D, framebuffer->rt[i]);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+  }
+  glBindRenderbuffer(GL_RENDERBUFFER, framebuffer->ds);
+  glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+
+  framebuffer->width  = width;
+  framebuffer->height = height;
+
+  glBindTexture(GL_TEXTURE_2D, 0);
+  glBindRenderbuffer(GL_RENDERBUFFER, 0);
+  fprintf(stderr, "[OK] Framebuffer resized: %dx%d\n", width, height);
+  return 0;
+}
+
+int glFrameBufferDispose(struct glFrameBuffer* framebuffer) {
+  glDeleteFramebuffers(1, &framebuffer->fbo);
+  glDeleteTextures(framebuffer->rtcount, framebuffer->rt);
+  glDeleteRenderbuffers(1, &framebuffer->ds);
+  return 0;
+}
+
 //=========================[CONFIG PARSER LIB]===================================================
 
 #define MAX_LINE_LENGTH 512
@@ -483,7 +554,13 @@ struct ShaderSession {
   GLuint                      shaderProgram;
   struct SessionConfiguration config;
   struct glMesh               quad;
+  struct glFrameBuffer        fbo;
   struct ShaderUniforms       uniforms;
+
+  int screenWidth;
+  int screenHeight;
+  int fboWidth;
+  int fboHeight;
 };
 
 int shaderSessionLoadProgram(struct ShaderSession* session) {
@@ -516,20 +593,59 @@ int shaderSessionLoad(struct ShaderSession* session, const char* configfile) {
 
   shaderSessionLoadProgram(session);
   shaderSessionLoadMesh(session);
+  glFrameBufferCreate(&session->fbo, 720, 640);
   return 0;
 }
 
+void shaderSessionBeginFBO(struct ShaderSession* session) {
+
+  session->screenWidth  = session->uniforms.width;
+  session->screenHeight = session->uniforms.height;
+
+  session->fboWidth  = session->screenWidth / 4;
+  session->fboHeight = session->screenHeight / 4;
+
+  glFrameBufferResize(&session->fbo, session->fboWidth, session->fboHeight);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, session->fbo.fbo);
+
+  glViewport(0, 0, session->fboWidth, session->fboHeight);
+
+  glClearColor(0.0, 0.0, 0.0, 1.0);
+  glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+void shaderSessionEndFBO(struct ShaderSession* session) {
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, session->fbo.fbo);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+
+  glBlitFramebuffer(
+    0, 0, session->fboWidth, session->fboHeight,
+    0, 0, session->screenWidth, session->screenHeight,
+    GL_COLOR_BUFFER_BIT,
+    GL_LINEAR);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glViewport(0, 0, session->screenWidth, session->screenHeight);
+}
+
 int shaderSessionDraw(struct ShaderSession* session) {
+  shaderSessionBeginFBO(session);
+
   glUseProgram(session->shaderProgram);
-  shaderUniformsUpload(&session->uniforms); // Upload uniforms before drawing
+  shaderUniformsUpload(&session->uniforms);
   glBindVertexArray(session->quad.vao);
   glDrawArrays(GL_TRIANGLES, 0, 6);
+
+  shaderSessionEndFBO(session);
+
   return 0;
 }
 
 int shaderSessionDispose(struct ShaderSession* session) {
   glDeleteProgram(session->shaderProgram);
   glMeshDispose(&session->quad);
+  glFrameBufferDispose(&session->fbo);
   return 0;
 }
 
