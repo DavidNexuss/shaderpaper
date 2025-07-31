@@ -6,19 +6,17 @@ pkgdesc="GLSL-based animated wallpaper shader runner for Linux (uses X11 + OpenG
 arch=('x86_64')
 url="https://github.com/DavidNexuss/shaderpaper"
 license=('MIT')
-depends=('libgl' 'libx11')
-makedepends=('gcc' 'make')
-source=(
-  "$pkgname-$pkgver.tar.gz"
-)
+depends=('libgl' 'libx11' 'glew')
+makedepends=('git' 'gcc' 'make')
+source=("git+${url}.git#tag=v$pkgver")
 md5sums=('SKIP')
 
 build() {
-  cd "$srcdir/$pkgname-$pkgver"
+  cd "$srcdir/$pkgname"
   make
 }
 
 package() {
-  cd "$srcdir/$pkgname-$pkgver"
-  install -Dm755 shaderpaper "$pkgdir/usr/bin/shaderpaper"
+  cd "$srcdir/$pkgname"
+  make DESTDIR="$pkgdir" install
 }

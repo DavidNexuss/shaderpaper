@@ -14316,7 +14316,7 @@ nk_style_from_table(struct nk_context *ctx, const struct nk_color *table)
     button->userdata        = nk_handle_ptr(0);
     button->text_alignment  = NK_TEXT_CENTERED;
     button->border          = 1.0f;
-    button->rounding        = 4.0f;
+    button->rounding        = 0.0f;
     button->draw_begin      = 0;
     button->draw_end        = 0;
 
@@ -14356,7 +14356,7 @@ nk_style_from_table(struct nk_context *ctx, const struct nk_color *table)
     button->userdata        = nk_handle_ptr(0);
     button->text_alignment  = NK_TEXT_CENTERED;
     button->border          = 0.0f;
-    button->rounding        = 1.0f;
+    button->rounding        = 0.0f;
     button->draw_begin      = 0;
     button->draw_end        = 0;
 
@@ -14573,7 +14573,7 @@ nk_style_from_table(struct nk_context *ctx, const struct nk_color *table)
     property->userdata      = nk_handle_ptr(0);
     property->padding       = nk_vec2(4,4);
     property->border        = 1;
-    property->rounding      = 10;
+    property->rounding      = 0;
     property->draw_begin    = 0;
     property->draw_end      = 0;
 

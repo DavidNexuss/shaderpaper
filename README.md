@@ -38,8 +38,6 @@ sudo apt install libx11-dev libgl1-mesa-dev libglx-dev
 make
 ```
 
-> Ensure that `glad.c`, `stb_image.c`, and your custom `parser.c` are present and included in the build process.
-
 ---
 
 ## 🧪 Running the Application
