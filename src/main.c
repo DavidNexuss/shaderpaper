@@ -4,14 +4,33 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/time.h>
+#include <X11/keysym.h>
 #include "nuklear.h"
 #include "stb_image.h"
-#include "string.h"
 #include "glad.h"
 #include <GL/gl.h>
 #include <GL/glx.h>
+#include "parser.h"
 
 typedef GLXContext (*glXCreateContextAttribsARBProc)(Display*, GLXFBConfig, GLXContext, Bool, const int*);
+
+void strndump(char* dst, const char* source, int max) {
+  if (source == 0) {
+    dst[0] = 0;
+  }
+
+  int i = 0;
+  while (source[i] && i < max) {
+    dst[i] = source[i];
+    i++;
+  }
+  if (i < max)
+    dst[i] = 0;
+  else
+    dst[max - 1] = 0;
+}
 
 //=========================[GL HELPERS]===================================================
 
@@ -151,8 +170,35 @@ struct glTexturePack {
   int              textureCount;
 };
 
+// Placeholder for glTextureLoad - actual implementation would load image data
 struct glTexture glTextureLoad(const char* path) {
+  struct glTexture tex = {0};
+  int              w, h, c;
+  unsigned char*   data = stbi_load(path, &w, &h, &c, 0);
+  if (data) {
+    glGenTextures(1, &tex.id);
+    glBindTexture(GL_TEXTURE_2D, tex.id);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    GLenum format = GL_RGB;
+    if (c == 4) format = GL_RGBA;
+    else if (c == 1)
+      format = GL_RED;
+    glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, format, GL_UNSIGNED_BYTE, data);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    stbi_image_free(data);
+    tex.width        = w;
+    tex.height       = h;
+    tex.channelCount = c;
+    tex.hdr          = 0; // Assuming non-HDR for simplicity
+  } else {
+    fprintf(stderr, "Failed to load texture: %s\n", path);
+  }
+  return tex;
 }
+
 struct glTexturePack glTexturePackLoad(int textureCount, char** texturePaths) {
   struct glTexturePack pack;
   pack.textureCount = textureCount;
@@ -166,66 +212,6 @@ struct glTexturePack glTexturePackLoad(int textureCount, char** texturePaths) {
 
 #define MAX_LINE_LENGTH 512
 
-int cfgGet(const char* currPos, const char* sec, const char* k, char* buf, size_t bufSize) {
-  if (!currPos || !k || !buf || bufSize == 0) return 1;
-
-  const char* searchEnd = NULL;
-
-  if (sec) {
-    char secHdr[MAX_LINE_LENGTH];
-    snprintf(secHdr, MAX_LINE_LENGTH, "[%s]", sec);
-
-    const char* secStartMarker = strstr(currPos, secHdr);
-    if (!secStartMarker) return 1;
-
-    currPos = strchr(secStartMarker, '\n');
-    if (!currPos) return 1;
-    currPos++;
-
-    const char* nextSecMarker = strstr(currPos, "[");
-    if (nextSecMarker) searchEnd = nextSecMarker;
-    else
-      searchEnd = currPos + strlen(currPos);
-  } else {
-    const char* firstSecMarker = strstr(currPos, "[");
-    if (firstSecMarker) searchEnd = firstSecMarker;
-    else
-      searchEnd = currPos + strlen(currPos);
-  }
-
-  char lineBuf[MAX_LINE_LENGTH];
-  char searchKeyPrefix[MAX_LINE_LENGTH];
-  snprintf(searchKeyPrefix, MAX_LINE_LENGTH, "%s=", k);
-  size_t keyPrefixLen = strlen(searchKeyPrefix);
-
-  while (currPos && (searchEnd == NULL || currPos < searchEnd)) {
-    const char* lineEnd = strchr(currPos, '\n');
-    size_t      lineLen;
-
-    if (lineEnd) lineLen = lineEnd - currPos;
-    else
-      lineLen = strlen(currPos);
-
-    if (lineLen >= MAX_LINE_LENGTH) {
-      currPos = lineEnd ? (lineEnd + 1) : NULL;
-      continue;
-    }
-
-    strncpy(lineBuf, currPos, lineLen);
-    lineBuf[lineLen] = '\0';
-
-    if (strncmp(lineBuf, searchKeyPrefix, keyPrefixLen) == 0) {
-      if (sscanf(lineBuf + keyPrefixLen, "%s", buf) == 1) {
-        if (strlen(buf) >= bufSize) buf[bufSize - 1] = '\0';
-        return 0;
-      }
-    }
-    currPos = lineEnd ? (lineEnd + 1) : NULL;
-  }
-  return 1;
-}
-
-
 //==========================================[APPLICATION CODE]==========================================
 
 enum ShaderMode {
@@ -234,8 +220,9 @@ enum ShaderMode {
 };
 
 enum ShaderMode getShaderMode(const char* sessionmode) {
+  if (sessionmode == 0) return 0;
   enum ShaderMode mode;
-  if (strcmp(sessionmode, "shader")) return SHADER_MODE_SHADER;
+  if (strcmp(sessionmode, "shader") == 0) return SHADER_MODE_SHADER;
   return SHADER_MODE_NONE;
 }
 
@@ -246,26 +233,31 @@ struct SessionConfiguration {
   char fragmentShader[MAX_LINE_LENGTH];
 };
 
-int SessionConfigurationParse(struct SessionConfiguration* configuration, const char* path) {
+int sessionConfigurationParse(struct SessionConfiguration* configuration, const char* path) {
   void* fdata = fileRead(path);
   if (fdata == 0) {
     fprintf(stderr, "Config file not found %s\n", path);
     return 1;
   }
 
-  char shadermode[256];
-  if (cfgGet(fdata, "general", "shadermode", shadermode, MAX_LINE_LENGTH)) return 1;
-  configuration->mode = getShaderMode(shadermode);
+  struct ParseContext* ctx = parseContextCreate(fdata);
+
+  configuration->mode = getShaderMode(parseContextGetValue(ctx, "general", "shadermode"));
 
   if (configuration->mode == SHADER_MODE_SHADER) {
-    if (cfgGet(fdata, "shader", "vertexshader", configuration->vertexShader, MAX_LINE_LENGTH)) return 1;
-    if (cfgGet(fdata, "shader", "fragmentShader", configuration->fragmentShader, MAX_LINE_LENGTH)) return 1;
+    strndump(configuration->vertexShader, parseContextGetValue(ctx, "shadermode/shader", "vertexshader"), MAX_LINE_LENGTH);
+    strndump(configuration->fragmentShader, parseContextGetValue(ctx, "shadermode/shader", "fragmentshader"), MAX_LINE_LENGTH);
   }
 
+  parseContextDispose(ctx);
+  free(fdata); // Free the file data
   return 0;
 }
 
-void SessionConfigurationPrint(struct SessionConfiguration* configuration) {
+void sessionConfigurationPrint(struct SessionConfiguration* configuration) {
+  printf("mode: %d\n", configuration->mode);
+  printf("vertexshader: %s\n", configuration->vertexShader);
+  printf("fragmentshader: %s\n", configuration->fragmentShader);
 }
 
 struct ShaderUniforms {
@@ -294,73 +286,80 @@ struct ShaderUniforms {
   GLuint userTexturesId[32];
 
   //Locations
-  GLuint uQuality;
-  GLuint uCameraPosition;
-  GLuint uCameraVelocity;
-  GLuint uTime;
-  GLuint uX;
-  GLuint uY;
-  GLuint uWidth;
-  GLuint uHeight;
-  GLuint uZoom;
-  GLuint uScroll;
-  GLuint uBattery;
-  GLuint uVolume;
-  GLuint uKeyStates;
-  GLuint uJoyStates;
-  GLuint uSampleStates;
-  GLuint uUserTextures;
-  GLuint uMaxVolume;
+  GLint iQuality;
+  GLint iCameraPosition;
+  GLint iCameraVelocity;
+  GLint iTime;
+  GLint iX;
+  GLint iY;
+  GLint iWidth;
+  GLint iHeight;
+  GLint iResolution;
+  GLint iZoom;
+  GLint iScroll;
+  GLint iBattery;
+  GLint iVolume;
+  GLint iKeyStates;
+  GLint iJoyStates;
+  GLint iSampleStates;
+  GLint iUserTextures;
+  GLint iMaxVolume;
 };
 
 void shaderUniformsInitLocations(struct ShaderUniforms* u, GLuint program) {
-#define GET_LOC(field, nameStr) u->field = glGetUniformLocation(program, nameStr)
+#define GET_LOC(field, nameStr)                                \
+  {                                                            \
+    u->field = glGetUniformLocation(program, nameStr);         \
+    if (u->field != -1) printf("Using uniform " nameStr "\n"); \
+  }
 
-  GET_LOC(uQuality, "uQuality");
-  GET_LOC(uCameraPosition, "uCameraPosition");
-  GET_LOC(uCameraVelocity, "uCameraVelocity");
-  GET_LOC(uTime, "uTime");
-  GET_LOC(uX, "uX");
-  GET_LOC(uY, "uY");
-  GET_LOC(uWidth, "uWidth");
-  GET_LOC(uHeight, "uHeight");
-  GET_LOC(uZoom, "uZoom");
-  GET_LOC(uScroll, "uScroll");
-  GET_LOC(uBattery, "uBattery");
-  GET_LOC(uVolume, "uVolume");
-  GET_LOC(uMaxVolume, "uMaxVolume");
+  GET_LOC(iQuality, "iQuality");
+  GET_LOC(iCameraPosition, "iCameraPosition");
+  GET_LOC(iCameraVelocity, "iCameraVelocity");
+  GET_LOC(iTime, "iTime");
+  GET_LOC(iX, "iX");
+  GET_LOC(iY, "iY");
+  GET_LOC(iWidth, "iWidth");
+  GET_LOC(iHeight, "iHeight");
+  GET_LOC(iResolution, "iResolution"); // Get location for new iResolution uniform
+  GET_LOC(iZoom, "iZoom");
+  GET_LOC(iScroll, "iScroll");
+  GET_LOC(iBattery, "iBattery");
+  GET_LOC(iVolume, "iVolume");
+  GET_LOC(iMaxVolume, "iMaxVolume");
 
-  GET_LOC(uKeyStates, "uKeyStates");
-  GET_LOC(uJoyStates, "uJoyStates");
-  GET_LOC(uSampleStates, "uSampleStates");
-  GET_LOC(uUserTextures, "uUserTextures");
+  GET_LOC(iKeyStates, "iKeyStates");
+  GET_LOC(iJoyStates, "iJoyStates");
+  GET_LOC(iSampleStates, "iSampleStates");
+  GET_LOC(iUserTextures, "iUserTextures");
 
 #undef GET_LOC
 }
 
-void shaderUniformsLoad(struct ShaderUniforms* u, GLuint program) {
-  if (u->uQuality != -1) glUniform1f(u->uQuality, u->quality);
-  if (u->uCameraPosition != -1) glUniform3fv(u->uCameraPosition, 1, u->cameraPosition);
-  if (u->uCameraVelocity != -1) glUniform3fv(u->uCameraVelocity, 1, u->cameraVelocity);
-  if (u->uTime != -1) glUniform1f(u->uTime, u->time);
-  if (u->uX != -1) glUniform1f(u->uX, u->x);
-  if (u->uY != -1) glUniform1f(u->uY, u->y);
-  if (u->uWidth != -1) glUniform1f(u->uWidth, u->width);
-  if (u->uHeight != -1) glUniform1f(u->uHeight, u->height);
-  if (u->uZoom != -1) glUniform1f(u->uZoom, u->zoom);
-  if (u->uScroll != -1) glUniform1f(u->uScroll, u->scroll);
-  if (u->uBattery != -1) glUniform1f(u->uBattery, u->battery);
-  if (u->uVolume != -1) glUniform1f(u->uVolume, u->volume);
-  if (u->uMaxVolume != -1) glUniform1f(u->uMaxVolume, u->maxVolume);
+void shaderUniformsUpload(struct ShaderUniforms* u) {
+  if (u->iQuality != -1) glUniform1f(u->iQuality, u->quality);
+  if (u->iCameraPosition != -1) glUniform3fv(u->iCameraPosition, 1, u->cameraPosition);
+  if (u->iCameraVelocity != -1) glUniform3fv(u->iCameraVelocity, 1, u->cameraVelocity);
+  if (u->iTime != -1) glUniform1f(u->iTime, u->time);
+  if (u->iX != -1) glUniform1f(u->iX, u->x);
+  if (u->iY != -1) glUniform1f(u->iY, u->y);
+  if (u->iWidth != -1) glUniform1f(u->iWidth, u->width);
+  if (u->iHeight != -1) glUniform1f(u->iHeight, u->height);
+  if (u->iResolution != -1) glUniform3f(u->iResolution, u->width, u->height, 1.0f); // Upload iResolution
+  if (u->iZoom != -1) glUniform1f(u->iZoom, u->zoom);
+  if (u->iScroll != -1) glUniform1f(u->iScroll, u->scroll);
+  if (u->iBattery != -1) glUniform1f(u->iBattery, u->battery);
+  if (u->iVolume != -1) glUniform1f(u->iVolume, u->volume);
+  if (u->iMaxVolume != -1) glUniform1f(u->iMaxVolume, u->maxVolume);
 
-  if (u->uKeyStates != -1) glUniform1iv(u->uKeyStates, 32, u->keyStates);
-  if (u->uJoyStates != -1) glUniform1iv(u->uJoyStates, 32, u->joyStates);
-  if (u->uSampleStates != -1) glUniform1iv(u->uSampleStates, 128, u->sampleStates);
+  if (u->iKeyStates != -1) glUniform1iv(u->iKeyStates, 32, u->keyStates);
+  if (u->iJoyStates != -1) glUniform1iv(u->iJoyStates, 32, u->joyStates);
+  if (u->iSampleStates != -1) glUniform1iv(u->iSampleStates, 128, u->sampleStates);
 
-  if (u->uUserTextures != -1) {
+  if (u->iUserTextures != -1) {
     int textureUnits[32];
     for (int i = 0; i < 32; ++i) textureUnits[i] = i;
-    glUniform1iv(u->uUserTextures, 32, textureUnits);
+    glUniform1iv(u->iUserTextures, 32, textureUnits);
   }
 
   for (int i = 0; i < 32; ++i) {
@@ -369,9 +368,100 @@ void shaderUniformsLoad(struct ShaderUniforms* u, GLuint program) {
       glBindTexture(GL_TEXTURE_2D, u->userTexturesId[i]);
     }
   }
-
-  glUseProgram(0);
 }
+
+// Structure to hold aggregated input state
+struct InputState {
+  int   mouseX;
+  int   mouseY;
+  int   windowWidth;
+  int   windowHeight;
+  int   keyStates[32]; // Keyboard keys and mouse buttons (1 for pressed, 0 for released)
+  float scrollDelta;   // Accumulated scroll delta
+};
+
+// Map X11 KeyCodes to a smaller, more manageable index for keyStates array
+// This is a simplified mapping. For a full mapping, a larger array or hash map would be needed.
+// For demonstration, let's map a few common keys and mouse buttons.
+// IMPORTANT: Actual KeyCodes vary between systems. You would typically use XKeysymToKeycode
+// to get the KeyCode for a specific Keysym (e.g., XK_w, XK_space) for portability.
+// The values below are illustrative examples.
+#define KEY_W_INDEX               0
+#define KEY_A_INDEX               1
+#define KEY_S_INDEX               2
+#define KEY_D_INDEX               3
+#define KEY_SPACE_INDEX           4
+#define KEY_LEFT_SHIFT_INDEX      5
+#define KEY_LEFT_CTRL_INDEX       6
+#define KEY_ESC_INDEX             7
+#define MOUSE_LEFT_BUTTON_INDEX   29
+#define MOUSE_RIGHT_BUTTON_INDEX  30
+#define MOUSE_MIDDLE_BUTTON_INDEX 31
+
+// Helper to get a simplified key index from an X11 KeyCode
+int getSimplifiedKeyIndex(KeyCode keycode) {
+  // This is a *very* simplified and potentially incorrect mapping for demonstration.
+  // In a real X11 application, you'd use XKeysymToKeycode and then map the Keysym.
+  // For example, XKeysymToKeycode(dpy, XK_w) would give you the KeyCode for 'w'.
+  // Then you'd use that KeyCode in your switch.
+  // For better portability, you should use XLookupKeysym(event.xkey, 0) to get the Keysym
+  // and then map based on Keysyms (e.g., XK_w, XK_a, etc.).
+  switch (keycode) {
+    // These are example keycodes. Actual keycodes vary.
+    // You'd typically find these by printing event.xkey.keycode during development.
+    // For example, on my system:
+    // 'w' -> 25, 'a' -> 38, 's' -> 39, 'd' -> 40, Space -> 65, LShift -> 50, LCtrl -> 37, Esc -> 9
+    case 25: return KEY_W_INDEX;
+    case 38: return KEY_A_INDEX;
+    case 39: return KEY_S_INDEX;
+    case 40: return KEY_D_INDEX;
+    case 65: return KEY_SPACE_INDEX;
+    case 50: return KEY_LEFT_SHIFT_INDEX;
+    case 37: return KEY_LEFT_CTRL_INDEX;
+    case 9: return KEY_ESC_INDEX;
+    default: return -1; // Unmapped key
+  }
+}
+
+void shaderUniformsUpdate(struct ShaderUniforms* u, const struct InputState* input, float currentTime) {
+  // Update time
+  u->time = currentTime;
+
+  // Update window dimensions
+  u->width  = (float)input->windowWidth;
+  u->height = (float)input->windowHeight;
+
+  // Update mouse position
+  u->x = (float)input->mouseX;
+  u->y = (float)input->mouseY;
+
+  // Update key states
+  for (int i = 0; i < 32; ++i) {
+    u->keyStates[i] = input->keyStates[i];
+  }
+
+  // Update scroll
+  u->scroll = input->scrollDelta;
+
+  // Other uniforms (quality, zoom, battery, volume, camera, joyStates, sampleStates)
+  // These would need external data sources or default values if not provided by X11.
+  // For this update, we'll leave them at their default/initial values or assume they are updated elsewhere.
+  // You can set initial values or update them based on game logic or other system APIs.
+  u->quality           = 1.0f; // Example default
+  u->zoom              = 1.0f; // Example default
+  u->battery           = 1.0f; // Placeholder (e.g., from a power management API)
+  u->volume            = 0.5f; // Placeholder (e.g., from an audio mixer API)
+  u->maxVolume         = 1.0f; // Placeholder
+  u->cameraPosition[0] = 0.0f;
+  u->cameraPosition[1] = 0.0f;
+  u->cameraPosition[2] = 0.0f; // Example default
+  u->cameraVelocity[0] = 0.0f;
+  u->cameraVelocity[1] = 0.0f;
+  u->cameraVelocity[2] = 0.0f;                         // Example default
+  memset(u->joyStates, 0, sizeof(u->joyStates));       // Clear if not updated by joystick input
+  memset(u->sampleStates, 0, sizeof(u->sampleStates)); // Clear if not updated by audio samples
+}
+
 struct ShaderSession {
   GLuint                      shaderProgram;
   struct SessionConfiguration config;
@@ -379,22 +469,44 @@ struct ShaderSession {
   struct ShaderUniforms       uniforms;
 };
 
-int shaderSessionLoad(struct ShaderSession* session, const char* configfile) {
-  if (SessionConfigurationParse(&session->config, configfile)) {
-    fprintf(stderr, "Error parsing config file %s\n", configfile);
-    return 1;
-  }
-
+int shaderSessionLoadProgram(struct ShaderSession* session) {
   GLuint program = glProgramCompile(session->config.fragmentShader, session->config.vertexShader);
 
   if (!program) {
     fprintf(stderr, "Error compiling shaders %s %s\n", session->config.vertexShader, session->config.fragmentShader);
     return 1;
+  } else {
+    fprintf(stderr, "[OK] Shader compilation.\n");
   }
   session->shaderProgram = program;
-  session->quad          = glQuadLoad();
+  glUseProgram(session->shaderProgram);
 
-  shaderUniformsLoad(&session->uniforms, session->shaderProgram);
+  shaderUniformsInitLocations(&session->uniforms, session->shaderProgram);
+  shaderUniformsUpload(&session->uniforms);
+  return 0;
+}
+
+int shaderSessionLoadMesh(struct ShaderSession* session) {
+  session->quad = glQuadLoad();
+  return 0;
+}
+
+int shaderSessionLoad(struct ShaderSession* session, const char* configfile) {
+  if (sessionConfigurationParse(&session->config, configfile)) {
+    fprintf(stderr, "Error parsing config file %s\n", configfile);
+    return 1;
+  }
+
+  shaderSessionLoadProgram(session);
+  shaderSessionLoadMesh(session);
+  return 0;
+}
+
+int shaderSessionDraw(struct ShaderSession* session) {
+  glUseProgram(session->shaderProgram);
+  shaderUniformsUpload(&session->uniforms); // Upload uniforms before drawing
+  glBindVertexArray(session->quad.vao);
+  glDrawArrays(GL_TRIANGLES, 0, 6);
   return 0;
 }
 
@@ -404,7 +516,9 @@ int shaderSessionDispose(struct ShaderSession* session) {
   return 0;
 }
 
-void printUsage() {}
+void printUsage() {
+  fprintf(stderr, "Usage: <executable> <config_file_path>\n");
+}
 
 int application(int argc, char** argv, Display* dpy, Window win) {
   if (!(argc > 1)) {
@@ -425,9 +539,9 @@ int application(int argc, char** argv, Display* dpy, Window win) {
       glColor3f(1.0, 0.0, 0.0);
       glVertex2f(-0.6f, -0.4f);
       glColor3f(0.0, 1.0, 0.0);
-      glVertex2f(0.6f, -0.4f);
+      glVertex3f(0.6f, -0.4f, 0.0f);
       glColor3f(0.0, 0.0, 1.0);
-      glVertex2f(0.0f, 0.6f);
+      glVertex3f(0.0f, 0.6f, 0.0f);
       glEnd();
 
       glXSwapBuffers(dpy, win);
@@ -437,6 +551,18 @@ int application(int argc, char** argv, Display* dpy, Window win) {
   }
 
   struct ShaderSession session;
+  struct InputState    inputState;
+  memset(&inputState, 0, sizeof(struct InputState)); // Initialize all to zero
+
+  // Set initial window dimensions
+  XWindowAttributes wa;
+  XGetWindowAttributes(dpy, win, &wa);
+  inputState.windowWidth  = wa.width;
+  inputState.windowHeight = wa.height;
+  glViewport(0, 0, inputState.windowWidth, inputState.windowHeight); // Set initial viewport
+
+  // Select input events to listen for
+  XSelectInput(dpy, win, ExposureMask | KeyPressMask | KeyReleaseMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | StructureNotifyMask); // For ConfigureNotify (resize)
 
   const char* configfile = argv[1];
 
@@ -445,17 +571,99 @@ int application(int argc, char** argv, Display* dpy, Window win) {
     return 1;
   }
 
+  struct timeval start_time, current_time;
+  gettimeofday(&start_time, NULL);
+
   while (1) {
     XEvent ev;
+    // Process all pending events
     while (XPending(dpy)) {
       XNextEvent(dpy, &ev);
+
+      switch (ev.type) {
+        case ConfigureNotify:
+          // Window was resized
+          if (ev.xconfigure.width != inputState.windowWidth ||
+              ev.xconfigure.height != inputState.windowHeight) {
+            inputState.windowWidth  = ev.xconfigure.width;
+            inputState.windowHeight = ev.xconfigure.height;
+            glViewport(0, 0, inputState.windowWidth, inputState.windowHeight);
+          }
+          break;
+        case MotionNotify:
+          // Mouse moved
+          inputState.mouseX = ev.xmotion.x;
+          inputState.mouseY = ev.xmotion.y;
+          break;
+        case KeyPress: {
+          // Key pressed
+          int keyIdx = getSimplifiedKeyIndex(ev.xkey.keycode);
+          if (keyIdx != -1) {
+            inputState.keyStates[keyIdx] = 1; // Set key state to 1 (pressed)
+          }
+          break;
+        }
+        case KeyRelease: {
+          // Key released
+          // X11 can generate duplicate KeyRelease events if auto-repeat is on.
+          // To avoid this, check if the key is truly up.
+          if (XEventsQueued(dpy, QueuedAfterReading)) {
+            XEvent next_ev;
+            XPeekEvent(dpy, &next_ev);
+            if (next_ev.type == KeyPress &&
+                next_ev.xkey.time == ev.xkey.time &&
+                next_ev.xkey.keycode == ev.xkey.keycode) {
+              // This is an auto-repeat, ignore the KeyRelease
+              XNextEvent(dpy, &ev); // Consume the KeyPress to remove it from queue
+              break;
+            }
+          }
+          int keyIdx = getSimplifiedKeyIndex(ev.xkey.keycode);
+          if (keyIdx != -1) {
+            inputState.keyStates[keyIdx] = 0; // Set key state to 0 (released)
+          }
+          break;
+        }
+        case ButtonPress:
+          // Mouse button pressed
+          switch (ev.xbutton.button) {
+            case Button1: inputState.keyStates[MOUSE_LEFT_BUTTON_INDEX] = 1; break;
+            case Button2: inputState.keyStates[MOUSE_MIDDLE_BUTTON_INDEX] = 1; break;
+            case Button3: inputState.keyStates[MOUSE_RIGHT_BUTTON_INDEX] = 1; break;
+            case Button4: inputState.scrollDelta += 1.0f; break; // Scroll up
+            case Button5: inputState.scrollDelta -= 1.0f; break; // Scroll down
+          }
+          break;
+        case ButtonRelease:
+          // Mouse button released
+          switch (ev.xbutton.button) {
+            case Button1: inputState.keyStates[MOUSE_LEFT_BUTTON_INDEX] = 0; break;
+            case Button2: inputState.keyStates[MOUSE_MIDDLE_BUTTON_INDEX] = 0; break;
+            case Button3:
+              inputState.keyStates[MOUSE_RIGHT_BUTTON_INDEX] = 0;
+              break;
+              // For scroll, we don't clear the delta on release, it's just a pulse.
+              // The uniform will be updated with the current delta.
+          }
+          break;
+      }
     }
 
-    glClearColor(0.1f, 0.0f, 0.2f, 1.0f);
+    // Calculate elapsed time
+    gettimeofday(&current_time, NULL);
+    float elapsed_time = (current_time.tv_sec - start_time.tv_sec) +
+      (current_time.tv_usec - start_time.tv_usec) / 1000000.0f;
+
+    // Update uniforms with current input state and time
+    shaderUniformsUpdate(&session.uniforms, &inputState, elapsed_time);
+
+    glClearColor(0.1f, 1.0f, 0.2f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
+    shaderSessionDraw(&session);
+
     glXSwapBuffers(dpy, win);
-    usleep(16000);
+    usleep(16000); // Approximately 60 FPS
   }
 }
 
@@ -506,7 +714,7 @@ int main(int argc, char** argv) {
 
   XSetWindowAttributes swa;
   swa.colormap   = cmap;
-  swa.event_mask = ExposureMask;
+  swa.event_mask = ExposureMask; // Initial event mask, will be updated in application()
 
   int width  = DisplayWidth(dpy, screen);
   int height = DisplayHeight(dpy, screen);
