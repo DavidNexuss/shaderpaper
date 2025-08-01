@@ -15,8 +15,6 @@
 #define GLT_IMPLEMENTATION
 #include "glText.h"
 #define NK_PRIVATE
-
-
 #define NK_INCLUDE_FIXED_TYPES
 #define NK_INCLUDE_STANDARD_IO
 #define NK_INCLUDE_DEFAULT_ALLOCATOR
@@ -33,7 +31,6 @@
 #define MAX_LINE_LENGTH    512
 #define MAX_LOG_SIZE       512 * 8
 #define MAX_TEXTURE_SLOTS  32
-
 
 typedef GLXContext (*glXCreateContextAttribsARBProc)(Display*, GLXFBConfig, GLXContext, Bool, const int*);
 
@@ -146,7 +143,6 @@ void* fileRead(const char* abpath) {
   return source;
 }
 
-
 char infolog[MAX_LOG_SIZE];
 
 GLuint glShaderCompile(const char* path, GLenum type) {
@@ -198,11 +194,12 @@ GLuint glProgramCompile(const char* fs, const char* vs) {
 
 struct glMesh {
   GLuint vbo;
+  GLuint ebo;
   GLuint vao;
 };
 
 struct glMesh glQuadLoad() {
-  struct glMesh mesh;
+  struct glMesh mesh = {0};
 
   float quadData[] = {
     -1.0f, -1.0f,
@@ -228,8 +225,90 @@ struct glMesh glQuadLoad() {
 
   return mesh;
 }
+struct glMesh glCubeLoad() {
+  struct glMesh mesh;
+
+  float vertices[] = {
+    // Front face
+    -1.0f,
+    -1.0f,
+    1.0f,
+    1.0f,
+    -1.0f,
+    1.0f,
+    1.0f,
+    1.0f,
+    1.0f,
+    -1.0f,
+    1.0f,
+    1.0f,
+
+    // Back face
+    -1.0f,
+    -1.0f,
+    -1.0f,
+    1.0f,
+    -1.0f,
+    -1.0f,
+    1.0f,
+    1.0f,
+    -1.0f,
+    -1.0f,
+    1.0f,
+    -1.0f,
+  };
+
+  // Indices to define the two triangles for each of the six faces.
+  // This avoids duplicating vertex data for each face.
+  unsigned int indices[] = {
+    // Front face
+    0, 1, 2,
+    2, 3, 0,
+
+    // Right face
+    1, 5, 6,
+    6, 2, 1,
+
+    // Back face
+    7, 6, 5,
+    5, 4, 7,
+
+    // Left face
+    4, 0, 3,
+    3, 7, 4,
+
+    // Top face
+    3, 2, 6,
+    6, 7, 3,
+
+    // Bottom face
+    4, 5, 1,
+    1, 0, 4};
+
+  glGenVertexArrays(1, &mesh.vao);
+  glBindVertexArray(mesh.vao);
+
+  glGenBuffers(1, &mesh.vbo);
+  glBindBuffer(GL_ARRAY_BUFFER, mesh.vbo);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+  glGenBuffers(1, &mesh.ebo);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
+  glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+
+  glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+  glEnableVertexAttribArray(0);
+
+  glBindVertexArray(0);
+  glBindBuffer(GL_ARRAY_BUFFER, 0);
+  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+  return mesh;
+}
 
 void glMeshDispose(struct glMesh* mesh) {
+  if (mesh->ebo)
+    glDeleteBuffers(1, &mesh->ebo);
   glDeleteBuffers(1, &mesh->vbo);
   glDeleteVertexArrays(1, &mesh->vao);
 }
@@ -519,7 +598,7 @@ int sessionConfigurationParse(struct SessionConfiguration* configuration, const 
 
     for (int i = 0; i < MAX_TEXTURE_SLOTS; i++) {
       char uniformName[MAX_LINE_LENGTH];
-      sprintf(uniformName, "usertexture%d", i + 1);
+      sprintf(uniformName, "iUserTextures%d", i);
 
       const char* texturePath = parseContextGetValue(ctx, "shadermode/uniforms", uniformName);
       if (texturePath != NULL) {
@@ -722,6 +801,7 @@ struct ShaderSession {
   GLuint                      shaderProgram;
   struct SessionConfiguration config;
   struct glMesh               quad;
+  struct glMesh               cube;
   struct glFrameBuffer        fbo;
   struct ShaderUniforms       uniforms;
   struct glTexturePack        usertextures;
@@ -763,6 +843,7 @@ int shaderSessionLoadUserTextures(struct ShaderSession* session) {
 
 int shaderSessionLoadMesh(struct ShaderSession* session) {
   session->quad = glQuadLoad();
+  session->cube = glCubeLoad();
   return 0;
 }
 
@@ -864,6 +945,7 @@ int shaderSessionDispose(struct ShaderSession* session) {
   gltDeleteText(session->errorText);
   glDeleteProgram(session->shaderProgram);
   glMeshDispose(&session->quad);
+  glMeshDispose(&session->cube);
   glTexturePackDispose(&session->usertextures);
   glFrameBufferDispose(&session->fbo);
   return 0;
@@ -891,15 +973,6 @@ int application(int argc, char** argv, Display* dpy, Window win) {
 
       glClearColor(0.1f, 0.0f, 0.2f, 1.0f);
       glClear(GL_COLOR_BUFFER_BIT);
-
-      glBegin(GL_TRIANGLES);
-      glColor3f(1.0, 0.0, 0.0);
-      glVertex2f(-0.6f, -0.4f);
-      glColor3f(0.0, 1.0, 0.0);
-      glVertex3f(0.6f, -0.4f, 0.0f);
-      glColor3f(0.0, 0.0, 1.0);
-      glVertex3f(0.0f, 0.6f, 0.0f);
-      glEnd();
 
       glXSwapBuffers(dpy, win);
       usleep(16000);
@@ -957,33 +1030,28 @@ int application(int argc, char** argv, Display* dpy, Window win) {
           // Key pressed
           int keyIdx = getSimplifiedKeyIndex(ev.xkey.keycode);
           if (keyIdx != -1) {
-            inputState.keyStates[keyIdx] = 1; // Set key state to 1 (pressed)
+            inputState.keyStates[keyIdx] = 1;
           }
           break;
         }
         case KeyRelease: {
-          // Key released
-          // X11 can generate duplicate KeyRelease events if auto-repeat is on.
-          // To avoid this, check if the key is truly up.
           if (XEventsQueued(dpy, QueuedAfterReading)) {
             XEvent next_ev;
             XPeekEvent(dpy, &next_ev);
             if (next_ev.type == KeyPress &&
                 next_ev.xkey.time == ev.xkey.time &&
                 next_ev.xkey.keycode == ev.xkey.keycode) {
-              // This is an auto-repeat, ignore the KeyRelease
-              XNextEvent(dpy, &ev); // Consume the KeyPress to remove it from queue
+              XNextEvent(dpy, &ev);
               break;
             }
           }
           int keyIdx = getSimplifiedKeyIndex(ev.xkey.keycode);
           if (keyIdx != -1) {
-            inputState.keyStates[keyIdx] = 0; // Set key state to 0 (released)
+            inputState.keyStates[keyIdx] = 0;
           }
           break;
         }
         case ButtonPress:
-          // Mouse button pressed
           switch (ev.xbutton.button) {
             case Button1: inputState.keyStates[MOUSE_LEFT_BUTTON_INDEX] = 1; break;
             case Button2: inputState.keyStates[MOUSE_MIDDLE_BUTTON_INDEX] = 1; break;
@@ -1000,8 +1068,6 @@ int application(int argc, char** argv, Display* dpy, Window win) {
             case Button3:
               inputState.keyStates[MOUSE_RIGHT_BUTTON_INDEX] = 0;
               break;
-              // For scroll, we don't clear the delta on release, it's just a pulse.
-              // The uniform will be updated with the current delta.
           }
           break;
       }
