@@ -3,8 +3,19 @@ out vec3 color;
 in vec2 fUV;
 uniform sampler2D iUserTextures[32];
 uniform float iTime;
+uniform float iX;
+uniform vec3 iResolution;
+
+uniform float factor;
 
 void main() { 
-  vec2 uv = fUV + vec2(sin(iTime * 0.1 + fUV.x * 32.0) * 0.2, cos(iTime * 0.4 + fUV.y * 12.04 + fUV.x * 32.04) * 0.4);
-  color = texture2D(iUserTextures[0], uv).xyz;
+  vec2 uv = fUV;
+  vec3 a = texture2D(iUserTextures[0], uv).xyz;
+  vec3 b = texture2D(iUserTextures[1], uv).xyz;
+
+  float f = sin(fUV.x + iTime) * 0.5 + 0.5;
+  float r = (fUV.x - iX / iResolution.x);
+
+  r*= factor;
+  color = mix(a, b, smoothstep(0.0,0.3,r));
 } 

@@ -26,11 +26,13 @@
 #define NK_XLIB_GL3_IMPLEMENTATION
 #include "nuklear_xlib_gl3.h"
 
-#define MAX_VERTEX_BUFFER  512 * 1024
-#define MAX_ELEMENT_BUFFER 128 * 1024
-#define MAX_LINE_LENGTH    512
-#define MAX_LOG_SIZE       512 * 8
-#define MAX_TEXTURE_SLOTS  32
+#define MAX_VERTEX_BUFFER       512 * 1024
+#define MAX_ELEMENT_BUFFER      128 * 1024
+#define MAX_LINE_LENGTH         512
+#define MAX_LOG_SIZE            512 * 8
+#define MAX_TEXTURE_SLOTS       32
+#define MAX_HINT_UNIFORMS       128
+#define MAX_UNIFORM_NAME_LENGTH 256
 
 typedef GLXContext (*glXCreateContextAttribsARBProc)(Display*, GLXFBConfig, GLXContext, Bool, const int*);
 
@@ -333,6 +335,7 @@ struct glTexturePack glTexturePackLoad(int textureCount, char** texturePaths) {
   struct glTexturePack pack = {0};
   pack.textureCount         = textureCount;
 
+  stbi_set_flip_vertically_on_load(1);
   for (int i = 0; i < textureCount; i++) {
     char* path            = findfile(texturePaths[i]);
     pack.textures[i].data = stbi_load(path, &pack.textures[i].width, &pack.textures[i].height, &pack.textures[i].channelCount, 0);
@@ -616,6 +619,14 @@ int sessionConfigurationParse(struct SessionConfiguration* configuration, const 
 
 //====================================================[UNIFORMS]=============================================
 
+union UniformValue {
+  int   i_val;
+  float f_val;
+  float v2_val[2];
+  float v3_val[3];
+  float m4_val[16];
+  int   s_val;
+};
 struct ShaderUniforms {
   //Uniform data
   float quality;
@@ -662,6 +673,12 @@ struct ShaderUniforms {
   GLint iSampleStates;
   GLint iUserTextures;
   GLint iMaxVolume;
+
+  GLint              hintUniforms[MAX_HINT_UNIFORMS];
+  GLenum             hintUniformsType[MAX_HINT_UNIFORMS];
+  char*              hintUniformsName[MAX_HINT_UNIFORMS];
+  int                hintUniformsCount;
+  union UniformValue hintUniformsValue[MAX_HINT_UNIFORMS];
 };
 
 void shaderUniformsInitLocations(struct ShaderUniforms* u, GLuint program) {
@@ -728,6 +745,88 @@ void shaderUniformsUpload(struct ShaderUniforms* u) {
       glBindTexture(GL_TEXTURE_2D, u->userTexturesId[i]);
     }
   }
+}
+
+void shaderUserUniformsUpload(struct ShaderUniforms* u) {
+  for (int i = 0; i < u->hintUniformsCount; ++i) {
+    if (u->hintUniforms[i] == -1) continue;
+
+    GLint              location = u->hintUniforms[i];
+    union UniformValue value    = u->hintUniformsValue[i];
+
+    switch (u->hintUniformsType[i]) {
+      case GL_FLOAT:
+        glUniform1f(location, value.f_val);
+        break;
+      case GL_INT:
+        glUniform1i(location, value.i_val);
+        break;
+      case GL_FLOAT_VEC2:
+        glUniform2fv(location, 1, value.v2_val);
+        break;
+      case GL_FLOAT_VEC3:
+        glUniform3fv(location, 1, value.v3_val);
+        break;
+      case GL_FLOAT_MAT4:
+        glUniformMatrix4fv(location, 1, GL_FALSE, value.m4_val);
+        break;
+      case GL_SAMPLER_2D:
+        glUniform1i(location, value.s_val);
+        break;
+      default:
+        break;
+    }
+  }
+}
+
+
+void shaderUniformsFindUserDefined(struct ShaderUniforms* u, GLuint program) {
+  GLint numUniforms = 0;
+  glGetProgramiv(program, GL_ACTIVE_UNIFORMS, &numUniforms);
+
+  printf("\nFound %d active uniforms in the shader program.\n", numUniforms);
+
+  u->hintUniformsCount = 0;
+
+  for (int i = 0; i < numUniforms; ++i) {
+    GLchar  name[MAX_UNIFORM_NAME_LENGTH];
+    GLsizei length = 0;
+    GLint   size   = 0;
+    GLenum  type   = 0;
+
+    glGetActiveUniform(program, i, MAX_UNIFORM_NAME_LENGTH, &length, &size, &type, name);
+
+    //Skip system defined uniform
+    if (name[0] == 'i' && length > 1 && name[1] > 'A' && name[1] < 'Z') continue;
+
+    if (u->hintUniformsCount < MAX_HINT_UNIFORMS) {
+      GLint location                            = glGetUniformLocation(program, name);
+      u->hintUniforms[u->hintUniformsCount]     = location;
+      u->hintUniformsType[u->hintUniformsCount] = type;
+
+      printf("Registered user-defined uniform: %s (Location: %d, Type: %d)\n", name, location, type);
+
+      union UniformValue value;
+      switch (type) {
+        case GL_FLOAT: value.f_val = 0.0f; break;
+        case GL_INT: value.i_val = 0; break;
+        case GL_FLOAT_VEC2: value.v2_val[0] = value.v2_val[1] = 0.0f; break;
+        case GL_FLOAT_VEC3: value.v3_val[0] = value.v3_val[1] = value.v3_val[2] = 0.0f; break;
+        case GL_FLOAT_MAT4: memset(value.m4_val, 0, sizeof(value.m4_val)); break;
+        case GL_SAMPLER_2D: value.s_val = 0; break;
+        default: break;
+      }
+
+      u->hintUniformsName[u->hintUniformsCount]  = strdup(name);
+      u->hintUniformsValue[u->hintUniformsCount] = value;
+      u->hintUniformsCount++;
+    } else {
+      printf("Warning: Maximum user-defined uniforms reached. Uniform %s was not registered.\n", name);
+      break;
+    }
+  }
+
+  printf("Successfully registered %d user-defined uniforms.\n\n", u->hintUniformsCount);
 }
 
 struct InputState {
@@ -827,7 +926,9 @@ int shaderSessionLoadProgram(struct ShaderSession* session) {
   glUseProgram(session->shaderProgram);
 
   shaderUniformsInitLocations(&session->uniforms, session->shaderProgram);
+  shaderUniformsFindUserDefined(&session->uniforms, session->shaderProgram);
   shaderUniformsUpload(&session->uniforms);
+  shaderUserUniformsUpload(&session->uniforms);
   return 0;
 }
 
@@ -911,11 +1012,78 @@ int shaderSessionDrawErrored(struct ShaderSession* session) {
 }
 
 int shaderSessionConfigMenu(struct ShaderSession* session) {
-  if (nk_begin(ctx, "Render Configuration", nk_rect(50, 50, 200, 200),
+  if (nk_begin(ctx, "Render Configuration", nk_rect(50, 50, 250, 600),
                NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_SCALABLE |
                  NK_WINDOW_CLOSABLE | NK_WINDOW_MINIMIZABLE | NK_WINDOW_TITLE)) {
+
     nk_layout_row_dynamic(ctx, 25, 1);
     nk_property_int(ctx, "upscalingFactor:", 1, &session->config.upscalingFactor, 12, 1, 1);
+    nk_layout_row_dynamic(ctx, 15, 1);
+    nk_label(ctx, "", NK_TEXT_ALIGN_LEFT);
+
+    nk_layout_row_dynamic(ctx, 25, 1);
+    nk_label(ctx, "User Uniforms:", NK_TEXT_ALIGN_LEFT);
+
+    for (int i = 0; i < session->uniforms.hintUniformsCount; ++i) {
+      nk_layout_row_dynamic(ctx, 25, 1);
+
+      char* name = session->uniforms.hintUniformsName[i];
+      GLint type = session->uniforms.hintUniformsType[i];
+
+      if (strstr(name, "color") == name && type == GL_FLOAT_VEC3) {
+        union UniformValue value     = session->uniforms.hintUniformsValue[i];
+        struct nk_colorf   color_val = {value.v3_val[0], value.v3_val[1], value.v3_val[2], 1.0f};
+
+        nk_label(ctx, name, NK_TEXT_ALIGN_LEFT);
+        nk_layout_row_dynamic(ctx, 200, 1);
+
+        if (nk_group_begin(ctx, "Color Picker", 0)) {
+          nk_layout_row_static(ctx, 200, 200, 1);
+          color_val = nk_color_picker(ctx, color_val, NK_RGB);
+          nk_group_end(ctx);
+        }
+
+        value.v3_val[0] = color_val.r;
+        value.v3_val[1] = color_val.g;
+        value.v3_val[2] = color_val.b;
+
+        session->uniforms.hintUniformsValue[i] = value;
+      } else {
+        union UniformValue* value = &session->uniforms.hintUniformsValue[i];
+        switch (type) {
+          case GL_INT:
+            nk_property_int(ctx, name, -1000, &value->i_val, 1000, 1, 1);
+            break;
+          case GL_FLOAT:
+            nk_property_float(ctx, name, -1000.0f, &value->f_val, 1000.0f, 1.0f, 0.1f);
+            break;
+          case GL_FLOAT_VEC2:
+            nk_layout_row_dynamic(ctx, 25, 2);
+            nk_label(ctx, name, NK_TEXT_ALIGN_LEFT);
+            nk_property_float(ctx, "x", -1000.0f, &value->v2_val[0], 1000.0f, 1.0f, 0.1f);
+            nk_property_float(ctx, "y", -1000.0f, &value->v2_val[1], 1000.0f, 1.0f, 0.1f);
+            break;
+          case GL_FLOAT_VEC3:
+            nk_layout_row_dynamic(ctx, 25, 3);
+            nk_label(ctx, name, NK_TEXT_ALIGN_LEFT);
+            nk_property_float(ctx, "x", -1000.0f, &value->v3_val[0], 1000.0f, 1.0f, 0.1f);
+            nk_property_float(ctx, "y", -1000.0f, &value->v3_val[1], 1000.0f, 1.0f, 0.1f);
+            nk_property_float(ctx, "z", -1000.0f, &value->v3_val[2], 1000.0f, 1.0f, 0.1f);
+            break;
+          case GL_FLOAT_MAT4:
+            nk_layout_row_dynamic(ctx, 25, 1);
+            nk_label(ctx, name, NK_TEXT_ALIGN_LEFT);
+            nk_label(ctx, "  (Matrix values not editable)", NK_TEXT_ALIGN_LEFT);
+            break;
+          case GL_SAMPLER_2D:
+            nk_property_int(ctx, name, 0, &value->s_val, MAX_TEXTURE_SLOTS - 1, 1, 1);
+            break;
+          default:
+            nk_label(ctx, "Unknown Uniform Type", NK_TEXT_ALIGN_LEFT);
+            break;
+        }
+      }
+    }
   }
   nk_end(ctx);
   return 0;
@@ -932,6 +1100,7 @@ int shaderSessionDraw(struct ShaderSession* session) {
 
   glUseProgram(session->shaderProgram);
   shaderUniformsUpload(&session->uniforms);
+  shaderUserUniformsUpload(&session->uniforms);
   glBindVertexArray(session->quad.vao);
   glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -1093,7 +1262,7 @@ int application(int argc, char** argv, Display* dpy, Window win) {
     nk_x11_render(NK_ANTI_ALIASING_ON, MAX_VERTEX_BUFFER, MAX_ELEMENT_BUFFER);
 
     glXSwapBuffers(dpy, win);
-    usleep(16000); // Approximately 60 FPS
+    usleep(6000); // Approximately 60 FPS
   }
 }
 
