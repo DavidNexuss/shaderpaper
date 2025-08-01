@@ -32,6 +32,8 @@
 #define MAX_ELEMENT_BUFFER 128 * 1024
 #define MAX_LINE_LENGTH    512
 #define MAX_LOG_SIZE       512 * 8
+#define MAX_TEXTURE_SLOTS  32
+
 
 typedef GLXContext (*glXCreateContextAttribsARBProc)(Display*, GLXFBConfig, GLXContext, Bool, const int*);
 
@@ -44,20 +46,17 @@ int exists(const char* fname) {
   return 0;
 }
 
-void strndump(char* dst, const char* source, int max) {
-  if (source == 0) {
-    dst[0] = 0;
+int strndump(char* dst, const char* source, int max) {
+  if (source == 0 || max <= 0) {
+    if (max > 0) {
+      dst[0] = 0;
+    }
+    return 0;
   }
 
-  int i = 0;
-  while (source[i] && i < max) {
-    dst[i] = source[i];
-    i++;
-  }
-  if (i < max)
-    dst[i] = 0;
-  else
-    dst[max - 1] = 0;
+  strncpy(dst, source, max - 1);
+  dst[max - 1] = 0;
+  return 1;
 }
 
 //=========================[GL HELPERS]===================================================
@@ -84,7 +83,7 @@ const char* basedir   = "config/";
 const char* configdir = "~/.config/shaderpaper/";
 const char* systemdir = "/usr/share/shaderpaper/";
 
-void inplacepath(char* dst, const char* dir, const char* file) {
+void sstrcat(char* dst, const char* dir, const char* file) {
   memcpy(dst, dir, strlen(dir));
   memcpy(dst + strlen(dir), file, strlen(file));
   dst[strlen(dir) + strlen(file)] = 0;
@@ -100,8 +99,8 @@ char* findfile(const char* file) {
   char*       filepath;
   const char* lookup[] = {basedir, configdir, systemdir};
 
-  for (int i = 0; i < sizeof(lookup); i++) {
-    inplacepath(initialPath, lookup[i], file);
+  for (int i = 0; i < 3; i++) {
+    sstrcat(initialPath, lookup[i], file);
     filepath = resolve_path(initialPath);
 
     if (exists(filepath)) {
@@ -235,8 +234,11 @@ void glMeshDispose(struct glMesh* mesh) {
   glDeleteVertexArrays(1, &mesh->vao);
 }
 
+//======================================[TEXTURE]=======================================================================
+
 struct glTexture {
   GLuint id;
+  void*  data;
   int    width;
   int    height;
   int    channelCount;
@@ -244,47 +246,155 @@ struct glTexture {
 };
 
 struct glTexturePack {
-  struct glTexture textures[32];
+  struct glTexture textures[MAX_TEXTURE_SLOTS];
   int              textureCount;
 };
 
-// Placeholder for glTextureLoad - actual implementation would load image data
-struct glTexture glTextureLoad(const char* path) {
-  struct glTexture tex = {0};
-  int              w, h, c;
-  unsigned char*   data = stbi_load(path, &w, &h, &c, 0);
-  if (data) {
-    glGenTextures(1, &tex.id);
-    glBindTexture(GL_TEXTURE_2D, tex.id);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    GLenum format = GL_RGB;
-    if (c == 4) format = GL_RGBA;
-    else if (c == 1)
-      format = GL_RED;
-    glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, format, GL_UNSIGNED_BYTE, data);
-    glGenerateMipmap(GL_TEXTURE_2D);
-    stbi_image_free(data);
-    tex.width        = w;
-    tex.height       = h;
-    tex.channelCount = c;
-    tex.hdr          = 0; // Assuming non-HDR for simplicity
-  } else {
-    fprintf(stderr, "Failed to load texture: %s\n", path);
-  }
-  return tex;
-}
-
 struct glTexturePack glTexturePackLoad(int textureCount, char** texturePaths) {
-  struct glTexturePack pack;
-  pack.textureCount = textureCount;
+  struct glTexturePack pack = {0};
+  pack.textureCount         = textureCount;
+
   for (int i = 0; i < textureCount; i++) {
-    pack.textures[i] = glTextureLoad(texturePaths[i]);
+    char* path            = findfile(texturePaths[i]);
+    pack.textures[i].data = stbi_load(path, &pack.textures[i].width, &pack.textures[i].height, &pack.textures[i].channelCount, 0);
+    free(path);
+  }
+
+  for (int i = 0; i < textureCount; i++) {
+    if (pack.textures[i].data) {
+      int  w   = pack.textures[i].width;
+      int  h   = pack.textures[i].height;
+      int  c   = pack.textures[i].channelCount;
+      char hdr = pack.textures[i].hdr;
+
+      glGenTextures(1, &pack.textures[i].id);
+      glBindTexture(GL_TEXTURE_2D, pack.textures[i].id);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      GLenum format = GL_RGB;
+      if (c == 4) format = GL_RGBA;
+      else if (c == 1)
+        format = GL_RED;
+      glTexImage2D(GL_TEXTURE_2D, 0, format, w, h, 0, format, GL_UNSIGNED_BYTE, pack.textures[i].data);
+      glGenerateMipmap(GL_TEXTURE_2D);
+
+      free(pack.textures[i].data);
+    }
   }
   return pack;
 }
+
+void glTexturePackDispose(struct glTexturePack* textures) {
+  GLuint textureIds[MAX_TEXTURE_SLOTS];
+  for (int i = 0; i < textures->textureCount; i++)
+    textureIds[i] = textures->textures[i].id;
+  glDeleteTextures(textures->textureCount, textureIds);
+}
+
+//===================================================[TEXTURE ARRAY]===================================================
+
+GLuint glTextureArrayLoad(int textureCount, const char** texturePaths) {
+  GLuint textureArrayId;
+  glGenTextures(1, &textureArrayId);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, textureArrayId);
+
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_REPEAT);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+  glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+  int    width = 0, height = 0, channels = 0;
+  void*  data = NULL;
+  GLenum format;
+
+  data = stbi_load(texturePaths[0], &width, &height, &channels, 0);
+  if (!data) {
+    printf("Failed to load initial texture for array: %s\n", texturePaths[0]);
+    return 0;
+  }
+
+  if (channels == 4) {
+    format = GL_RGBA;
+  } else if (channels == 3) {
+    format = GL_RGB;
+  } else if (channels == 1) {
+    format = GL_RED;
+  } else {
+    printf("Unsupported channel count: %d\n", channels);
+    stbi_image_free(data);
+    return 0;
+  }
+
+  glTexStorage3D(GL_TEXTURE_2D_ARRAY, 1, GL_RGBA8, width, height, textureCount);
+
+  for (int i = 0; i < textureCount; i++) {
+    int   layerWidth, layerHeight, layerChannels;
+    void* layerData = stbi_load(texturePaths[i], &layerWidth, &layerHeight, &layerChannels, 0);
+
+    if (layerWidth != width || layerHeight != height) {
+      printf("Texture %s has mismatched dimensions and cannot be added to the array.\n", texturePaths[i]);
+      stbi_image_free(layerData);
+      continue;
+    }
+
+    glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, i, layerWidth, layerHeight, 1, format, GL_UNSIGNED_BYTE, layerData);
+    stbi_image_free(layerData);
+  }
+
+  glGenerateMipmap(GL_TEXTURE_2D_ARRAY);
+  glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+  return textureArrayId;
+}
+
+void glTextureArrayDispose(GLuint textureArrayId) {
+  glDeleteTextures(1, &textureArrayId);
+}
+
+//=========================================================[CUBEMAP]==========================================================
+
+
+GLuint glCubemapLoad(const char** faces) {
+  GLuint cubemapId;
+  glGenTextures(1, &cubemapId);
+  glBindTexture(GL_TEXTURE_CUBE_MAP, cubemapId);
+
+  int width, height, channels;
+
+  for (unsigned int i = 0; i < 6; i++) {
+    unsigned char* data = stbi_load(faces[i], &width, &height, &channels, 0);
+    if (data) {
+      GLenum format;
+      if (channels == 4)
+        format = GL_RGBA;
+      else if (channels == 3)
+        format = GL_RGB;
+      else
+        format = GL_RED;
+
+      glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, data);
+      stbi_image_free(data);
+    } else {
+      printf("Cubemap texture failed to load at path: %s\n", faces[i]);
+      stbi_image_free(data);
+    }
+  }
+
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+  return cubemapId;
+}
+
+void glCubemapDispose(GLuint cubemapId) {
+  glDeleteTextures(1, &cubemapId);
+}
+
+//====================================================[FRAMEBUFFER]============================================================
 
 struct glFrameBuffer {
   GLuint fbo;
@@ -360,8 +470,6 @@ int glFrameBufferDispose(struct glFrameBuffer* framebuffer) {
 //=========================[CONFIG PARSER LIB]===================================================
 
 
-//==========================================[APPLICATION CODE]==========================================
-
 enum ShaderMode {
   SHADER_MODE_NONE = 0,
   SHADER_MODE_SHADER
@@ -381,7 +489,16 @@ struct SessionConfiguration {
   int             upscalingFactor;
   char            vertexShader[MAX_LINE_LENGTH];
   char            fragmentShader[MAX_LINE_LENGTH];
+  char            texturePath[MAX_TEXTURE_SLOTS][MAX_LINE_LENGTH];
+  int             textureCount;
 };
+
+void sessionConfigurationPrint(struct SessionConfiguration* configuration) {
+  printf("mode: %d\n", configuration->mode);
+  printf("vertexshader: %s\n", configuration->vertexShader);
+  printf("fragmentshader: %s\n", configuration->fragmentShader);
+  printf("\n");
+}
 
 int sessionConfigurationParse(struct SessionConfiguration* configuration, const char* path) {
   void* fdata = fileRead(path);
@@ -394,21 +511,28 @@ int sessionConfigurationParse(struct SessionConfiguration* configuration, const 
 
   configuration->mode            = getShaderMode(parseContextGetValue(ctx, "general", "shadermode"));
   configuration->upscalingFactor = 1;
+  configuration->textureCount    = 0;
 
   if (configuration->mode == SHADER_MODE_SHADER) {
-    strndump(configuration->vertexShader, parseContextGetValue(ctx, "shadermode/shader", "vertexshader"), MAX_LINE_LENGTH);
     strndump(configuration->fragmentShader, parseContextGetValue(ctx, "shadermode/shader", "fragmentshader"), MAX_LINE_LENGTH);
+    strndump(configuration->vertexShader, parseContextGetValue(ctx, "shadermode/shader", "vertexshader"), MAX_LINE_LENGTH);
+
+    for (int i = 0; i < MAX_TEXTURE_SLOTS; i++) {
+      char uniformName[MAX_LINE_LENGTH];
+      sprintf(uniformName, "usertexture%d", i + 1);
+
+      const char* texturePath = parseContextGetValue(ctx, "shadermode/uniforms", uniformName);
+      if (texturePath != NULL) {
+        strndump(configuration->texturePath[configuration->textureCount], texturePath, MAX_LINE_LENGTH);
+        configuration->textureCount++;
+      }
+    }
   }
 
   parseContextDispose(ctx);
-  free(fdata); // Free the file data
+  free(fdata);
+  sessionConfigurationPrint(configuration);
   return 0;
-}
-
-void sessionConfigurationPrint(struct SessionConfiguration* configuration) {
-  printf("mode: %d\n", configuration->mode);
-  printf("vertexshader: %s\n", configuration->vertexShader);
-  printf("fragmentshader: %s\n", configuration->fragmentShader);
 }
 
 //====================================================[UNIFORMS]=============================================
@@ -436,7 +560,8 @@ struct ShaderUniforms {
   float maxVolume;
 
   //System data
-  GLuint userTexturesId[32];
+  GLuint userTexturesId[MAX_TEXTURE_SLOTS];
+  int    userTexturesCount;
 
   //Locations
   GLint iQuality;
@@ -513,12 +638,12 @@ void shaderUniformsUpload(struct ShaderUniforms* u) {
   if (u->iSampleStates != -1) glUniform1iv(u->iSampleStates, 128, u->sampleStates);
 
   if (u->iUserTextures != -1) {
-    int textureUnits[32];
-    for (int i = 0; i < 32; ++i) textureUnits[i] = i;
-    glUniform1iv(u->iUserTextures, 32, textureUnits);
+    int textureUnits[MAX_TEXTURE_SLOTS];
+    for (int i = 0; i < u->userTexturesCount; ++i) textureUnits[i] = i;
+    glUniform1iv(u->iUserTextures, u->userTexturesCount, textureUnits);
   }
 
-  for (int i = 0; i < 32; ++i) {
+  for (int i = 0; i < u->userTexturesCount; ++i) {
     if (u->userTexturesId[i]) {
       glActiveTexture(GL_TEXTURE0 + i);
       glBindTexture(GL_TEXTURE_2D, u->userTexturesId[i]);
@@ -526,22 +651,15 @@ void shaderUniformsUpload(struct ShaderUniforms* u) {
   }
 }
 
-// Structure to hold aggregated input state
 struct InputState {
   int   mouseX;
   int   mouseY;
   int   windowWidth;
   int   windowHeight;
-  int   keyStates[32]; // Keyboard keys and mouse buttons (1 for pressed, 0 for released)
-  float scrollDelta;   // Accumulated scroll delta
+  int   keyStates[32];
+  float scrollDelta;
 };
 
-// Map X11 KeyCodes to a smaller, more manageable index for keyStates array
-// This is a simplified mapping. For a full mapping, a larger array or hash map would be needed.
-// For demonstration, let's map a few common keys and mouse buttons.
-// IMPORTANT: Actual KeyCodes vary between systems. You would typically use XKeysymToKeycode
-// to get the KeyCode for a specific Keysym (e.g., XK_w, XK_space) for portability.
-// The values below are illustrative examples.
 #define KEY_W_INDEX               0
 #define KEY_A_INDEX               1
 #define KEY_S_INDEX               2
@@ -554,19 +672,8 @@ struct InputState {
 #define MOUSE_RIGHT_BUTTON_INDEX  30
 #define MOUSE_MIDDLE_BUTTON_INDEX 31
 
-// Helper to get a simplified key index from an X11 KeyCode
 int getSimplifiedKeyIndex(KeyCode keycode) {
-  // This is a *very* simplified and potentially incorrect mapping for demonstration.
-  // In a real X11 application, you'd use XKeysymToKeycode and then map the Keysym.
-  // For example, XKeysymToKeycode(dpy, XK_w) would give you the KeyCode for 'w'.
-  // Then you'd use that KeyCode in your switch.
-  // For better portability, you should use XLookupKeysym(event.xkey, 0) to get the Keysym
-  // and then map based on Keysyms (e.g., XK_w, XK_a, etc.).
   switch (keycode) {
-    // These are example keycodes. Actual keycodes vary.
-    // You'd typically find these by printing event.xkey.keycode during development.
-    // For example, on my system:
-    // 'w' -> 25, 'a' -> 38, 's' -> 39, 'd' -> 40, Space -> 65, LShift -> 50, LCtrl -> 37, Esc -> 9
     case 25: return KEY_W_INDEX;
     case 38: return KEY_A_INDEX;
     case 39: return KEY_S_INDEX;
@@ -580,29 +687,20 @@ int getSimplifiedKeyIndex(KeyCode keycode) {
 }
 
 void shaderUniformsUpdate(struct ShaderUniforms* u, const struct InputState* input, float currentTime) {
-  // Update time
   u->time = currentTime;
 
-  // Update window dimensions
   u->width  = (float)input->windowWidth;
   u->height = (float)input->windowHeight;
 
-  // Update mouse position
   u->x = (float)input->mouseX;
   u->y = (float)input->mouseY;
 
-  // Update key states
   for (int i = 0; i < 32; ++i) {
     u->keyStates[i] = input->keyStates[i];
   }
 
-  // Update scroll
   u->scroll = input->scrollDelta;
 
-  // Other uniforms (quality, zoom, battery, volume, camera, joyStates, sampleStates)
-  // These would need external data sources or default values if not provided by X11.
-  // For this update, we'll leave them at their default/initial values or assume they are updated elsewhere.
-  // You can set initial values or update them based on game logic or other system APIs.
   u->quality           = 1.0f; // Example default
   u->zoom              = 1.0f; // Example default
   u->battery           = 1.0f; // Placeholder (e.g., from a power management API)
@@ -626,6 +724,7 @@ struct ShaderSession {
   struct glMesh               quad;
   struct glFrameBuffer        fbo;
   struct ShaderUniforms       uniforms;
+  struct glTexturePack        usertextures;
 
   int      screenWidth;
   int      screenHeight;
@@ -652,22 +751,39 @@ int shaderSessionLoadProgram(struct ShaderSession* session) {
   return 0;
 }
 
+int shaderSessionLoadUserTextures(struct ShaderSession* session) {
+  char* texturesPaths[MAX_TEXTURE_SLOTS];
+
+  for (int i = 0; i < session->config.textureCount; i++)
+    texturesPaths[i] = session->config.texturePath[i];
+
+  session->usertextures = glTexturePackLoad(session->config.textureCount, texturesPaths);
+  return 0;
+}
+
 int shaderSessionLoadMesh(struct ShaderSession* session) {
   session->quad = glQuadLoad();
   return 0;
 }
 
 int shaderSessionCreate(struct ShaderSession* session, const char* configfile) {
-  session->errorText = gltCreateText();
-
   if (sessionConfigurationParse(&session->config, configfile)) {
     fprintf(stderr, "Error parsing config file %s\n", configfile);
     return 1;
   }
 
-  shaderSessionLoadProgram(session);
+  session->errorText = gltCreateText();
+  shaderSessionLoadUserTextures(session);
   shaderSessionLoadMesh(session);
+
+  for (int i = 0; i < session->usertextures.textureCount; i++)
+    session->uniforms.userTexturesId[i] = session->usertextures.textures[i].id;
+
+  session->uniforms.userTexturesCount = session->usertextures.textureCount;
+
+  shaderSessionLoadProgram(session);
   glFrameBufferCreate(&session->fbo, 720, 640);
+
   return 0;
 }
 
@@ -748,6 +864,7 @@ int shaderSessionDispose(struct ShaderSession* session) {
   gltDeleteText(session->errorText);
   glDeleteProgram(session->shaderProgram);
   glMeshDispose(&session->quad);
+  glTexturePackDispose(&session->usertextures);
   glFrameBufferDispose(&session->fbo);
   return 0;
 }
@@ -759,42 +876,6 @@ void printUsage() {
 }
 
 struct nk_colorf bg;
-
-void applicationGuiTest() {
-  /* GUI */
-  if (nk_begin(ctx, "Demo", nk_rect(50, 50, 200, 200),
-               NK_WINDOW_BORDER | NK_WINDOW_MOVABLE | NK_WINDOW_SCALABLE |
-                 NK_WINDOW_CLOSABLE | NK_WINDOW_MINIMIZABLE | NK_WINDOW_TITLE)) {
-    enum { EASY,
-           HARD };
-    static int op       = EASY;
-    static int property = 20;
-
-    nk_layout_row_static(ctx, 30, 80, 1);
-    if (nk_button_label(ctx, "button"))
-      fprintf(stdout, "button pressed\n");
-    nk_layout_row_dynamic(ctx, 30, 2);
-    if (nk_option_label(ctx, "easy", op == EASY)) op = EASY;
-    if (nk_option_label(ctx, "hard", op == HARD)) op = HARD;
-    nk_layout_row_dynamic(ctx, 25, 1);
-    nk_property_int(ctx, "Compression:", 0, &property, 100, 10, 1);
-
-    nk_layout_row_dynamic(ctx, 20, 1);
-    nk_label(ctx, "background:", NK_TEXT_LEFT);
-    nk_layout_row_dynamic(ctx, 25, 1);
-    if (nk_combo_begin_color(ctx, nk_rgb_cf(bg), nk_vec2(nk_widget_width(ctx), 400))) {
-      nk_layout_row_dynamic(ctx, 120, 1);
-      bg = nk_color_picker(ctx, bg, NK_RGBA);
-      nk_layout_row_dynamic(ctx, 25, 1);
-      bg.r = nk_propertyf(ctx, "#R:", 0, bg.r, 1.0f, 0.01f, 0.005f);
-      bg.g = nk_propertyf(ctx, "#G:", 0, bg.g, 1.0f, 0.01f, 0.005f);
-      bg.b = nk_propertyf(ctx, "#B:", 0, bg.b, 1.0f, 0.01f, 0.005f);
-      bg.a = nk_propertyf(ctx, "#A:", 0, bg.a, 1.0f, 0.01f, 0.005f);
-      nk_combo_end(ctx);
-    }
-  }
-  nk_end(ctx);
-}
 
 int application(int argc, char** argv, Display* dpy, Window win) {
   if (!(argc > 1)) {
@@ -826,9 +907,8 @@ int application(int argc, char** argv, Display* dpy, Window win) {
     return 1;
   }
 
-  struct ShaderSession session;
-  struct InputState    inputState;
-  memset(&inputState, 0, sizeof(struct InputState)); // Initialize all to zero
+  struct ShaderSession session    = {0};
+  struct InputState    inputState = {0};
 
   // Set initial window dimensions
   XWindowAttributes wa;
