@@ -17,5 +17,5 @@ void main() {
   float r = (fUV.x - iX / iResolution.x);
 
   r*= factor;
-  color = mix(a, b, smoothstep(0.0,0.3,r));
+  color = mix(a, b, smoothstep(-0.3,0.3,r));
 } 
